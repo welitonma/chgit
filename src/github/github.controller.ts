@@ -1,4 +1,12 @@
-import { Body, Controller, Post, Get, Query, Param } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Post,
+  Get,
+  Query,
+  Param,
+  Headers,
+} from '@nestjs/common';
 import { HttpException, HttpStatus } from '@nestjs/common';
 import {
   ApiTags,
@@ -8,13 +16,17 @@ import {
   ApiParam,
   ApiBody,
 } from '@nestjs/swagger';
-import { GithubService } from './github.service'; // Forçar atualização de tipagem
+import { GithubService } from './github.service';
 import { CreateIssueDto } from './dto/create-issue.dto';
+import { ChamadoIntegrationService } from '../chamado/chamado-integration.service';
 
 @ApiTags('GitHub')
 @Controller('github')
 export class GithubController {
-  constructor(private readonly githubService: GithubService) {}
+  constructor(
+    private readonly githubService: GithubService,
+    private readonly chamadoIntegrationService: ChamadoIntegrationService,
+  ) {}
 
   @Get('issues')
   @ApiOperation({
@@ -30,7 +42,9 @@ export class GithubController {
     status: 404,
     description: 'Repositório não encontrado ou sem permissão',
   })
-  async listarIssuesRepo(@Query('repo') repo: string): Promise<any> {
+  async listarIssuesRepo(
+    @Query('repo') repo: string,
+  ): Promise<Record<string, unknown>> {
     const ORG_OWNER = process.env.GITHUB_ORG_OWNER;
     if (!ORG_OWNER) {
       throw new HttpException(
@@ -39,13 +53,16 @@ export class GithubController {
       );
     }
     try {
-      return await this.githubService.listarIssuesRepo(ORG_OWNER, repo);
+      const issues = (await this.githubService.listarIssuesRepo(
+        ORG_OWNER,
+        repo,
+      )) as Record<string, unknown>;
+      return issues;
     } catch (e: unknown) {
       let message = 'Erro desconhecido';
       let status = HttpStatus.INTERNAL_SERVER_ERROR;
       if (e instanceof Error) {
         message = e.message;
-        // Verifica se o erro tem a propriedade status (type-safe)
         const errorWithStatus = e as Error & { status?: number };
         if (typeof errorWithStatus.status === 'number') {
           status = errorWithStatus.status;
@@ -123,15 +140,15 @@ export class GithubController {
     },
   })
   @ApiResponse({ status: 201, description: 'Issue criada com sucesso' })
-  async createIssue(@Body() dto: CreateIssueDto): Promise<Record<string, any>> {
-    // Lê o nome da organização do .env
+  async createIssue(
+    @Body() dto: CreateIssueDto,
+  ): Promise<Record<string, unknown>> {
     const ORG_OWNER = process.env.GITHUB_ORG_OWNER;
     if (!ORG_OWNER) {
       throw new Error(
         'A variável de ambiente GITHUB_ORG_OWNER não está definida.',
       );
     }
-    // Passa todos os campos do DTO para o service, alinhando com o novo DTO
     return this.githubService.criarIssue({
       owner: ORG_OWNER,
       repo: dto.repo,
@@ -163,8 +180,13 @@ export class GithubController {
   })
   @ApiQuery({ name: 'login', required: true, description: 'Usuário do GitHub' })
   @ApiResponse({ status: 200, description: 'Lista de projetos do usuário' })
-  async listarProjetosUsuario(@Query('login') login: string): Promise<any> {
-    return this.githubService.listarProjetosUsuario(login);
+  async listarProjetosUsuario(
+    @Query('login') login: string,
+  ): Promise<Record<string, unknown>> {
+    const projetos = (await this.githubService.listarProjetosUsuario(
+      login,
+    )) as Record<string, unknown>;
+    return projetos;
   }
 
   @Get('org-projects')
@@ -177,21 +199,65 @@ export class GithubController {
     description: 'Organização do GitHub',
   })
   @ApiResponse({ status: 200, description: 'Lista de projetos da organização' })
-  async listarProjetosOrganizacao(@Query('login') login: string): Promise<any> {
-    return this.githubService.listarProjetosOrganizacao(login);
+  async listarProjetosOrganizacao(
+    @Query('login') login: string,
+  ): Promise<Record<string, unknown>> {
+    const projetos = (await this.githubService.listarProjetosOrganizacao(
+      login,
+    )) as Record<string, unknown>;
+    return projetos;
   }
 
   @Get('project/:projectId')
   @ApiOperation({ summary: 'Detalhes de um projeto' })
   @ApiParam({ name: 'projectId', description: 'ID global do projeto' })
   @ApiResponse({ status: 200, description: 'Detalhes do projeto' })
-  async detalhesProjeto(@Param('projectId') projectId: string): Promise<any> {
-    return this.githubService.detalhesProjetoV2(projectId);
+  async detalhesProjeto(
+    @Param('projectId') projectId: string,
+  ): Promise<Record<string, unknown>> {
+    const projeto = (await this.githubService.detalhesProjetoV2(
+      projectId,
+    )) as Record<string, unknown>;
+    return projeto;
   }
   @Get('ratelimit')
   @ApiOperation({ summary: 'Consulta o rate limit do token GitHub' })
   @ApiResponse({ status: 200, description: 'Informações de rate limit' })
-  async getRateLimit(): Promise<any> {
-    return this.githubService.getRateLimit();
+  async getRateLimit(): Promise<Record<string, unknown>> {
+    const rateLimit = (await this.githubService.getRateLimit()) as Record<
+      string,
+      unknown
+    >;
+    return rateLimit;
+  }
+
+  @Post('issue-from-chamado/:id')
+  @ApiOperation({ summary: 'Cria uma issue a partir de um chamado interno' })
+  @ApiParam({ name: 'id', description: 'Identificador do chamado no sistema' })
+  @ApiResponse({ status: 201, description: 'Issue criada com sucesso' })
+  async createFromChamado(
+    @Param('id') id: string,
+    @Query('tamanho') tamanho?: string,
+    @Query('prioridade') prioridade?: string,
+    @Query('empresaNome') empresaNome?: string,
+    @Query('produtoNome') produtoNome?: string,
+    @Query('assuntoDescricao') assuntoDescricao?: string,
+    @Headers('authorization') authorization?: string,
+  ): Promise<Record<string, unknown>> {
+    const chamadoId = parseInt(id, 10);
+    if (isNaN(chamadoId)) {
+      throw new HttpException('ID de chamado inválido', HttpStatus.BAD_REQUEST);
+    }
+    const extras: Record<string, unknown> = {};
+    if (tamanho) extras.tamanho = tamanho;
+    if (prioridade) extras.prioridade = prioridade;
+    return this.chamadoIntegrationService.criarIssueDoChamado(
+      chamadoId,
+      authorization,
+      extras,
+      empresaNome,
+      produtoNome,
+      assuntoDescricao,
+    );
   }
 }

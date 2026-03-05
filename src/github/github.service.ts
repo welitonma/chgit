@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 export class GithubService {
   private octokit: Octokit | null = null;
   private readonly logger = new Logger(GithubService.name);
+  private readonly defaultBranchCache = new Map<string, string>();
 
   constructor(
     @Optional() private readonly githubAppAuthService: GithubAppAuthService,
@@ -58,10 +59,9 @@ export class GithubService {
     sistema?: string;
     linkChamado?: string;
     iteracao?: string;
-  }): Promise<Record<string, any>> {
+  }): Promise<Record<string, unknown>> {
     const octokit = await this.getOctokit();
 
-    // Monta o payload da issue com tipagem explícita
     const issuePayload: {
       owner: string;
       repo: string;
@@ -70,7 +70,6 @@ export class GithubService {
       assignees?: string[];
       labels?: string[];
       milestone?: number;
-      // reviewers, repository, linked_pull_requests não são suportados diretamente pela API REST de issues
     } = {
       owner: dto.owner,
       repo: dto.repo,
@@ -80,13 +79,11 @@ export class GithubService {
     if (dto.assignees) issuePayload.assignees = dto.assignees;
     if (dto.labels) issuePayload.labels = dto.labels;
     if (dto.milestone) {
-      // Milestone deve ser um número, não uma string
       const milestoneNumber = parseInt(dto.milestone, 10);
       if (!isNaN(milestoneNumber)) {
         issuePayload.milestone = milestoneNumber;
       }
     }
-    // Os campos reviewers, repository, linkedPullRequests não são aceitos diretamente na criação da issue REST
 
     let issue: { data: { number: number; node_id: string } };
     try {
@@ -120,7 +117,7 @@ export class GithubService {
     const finalProjectId =
       dto.projectId || this.configService.get<string>('GITHUB_PROJECT_ID');
     if (!finalProjectId) {
-      return issue.data as Record<string, any>;
+      return issue.data as Record<string, unknown>;
     }
     const contentId: string = issue.data.node_id;
 
@@ -141,7 +138,6 @@ export class GithubService {
         },
       );
 
-      // Extrai o itemId da resposta
       const itemId = (
         addResult as {
           addProjectV2ItemById?: { item?: { id?: string } };
@@ -149,9 +145,9 @@ export class GithubService {
       )?.addProjectV2ItemById?.item?.id;
 
       if (itemId) {
-        // Atualizar campos customizados do projeto v2
         await this.atualizarCamposCustomizados(
           octokit,
+
           finalProjectId,
           itemId,
           dto,
@@ -164,7 +160,95 @@ export class GithubService {
       throw error;
     }
 
-    return issue.data as Record<string, any>;
+    return issue.data as Record<string, unknown>;
+  }
+
+  /**
+   * Faz upload de um arquivo para o repositório e retorna a URL raw para uso em markdown.
+   * Usa o token pessoal (GITHUB_TOKEN) pois o GitHub App pode não ter permissão de Contents write.
+   */
+  async uploadFileToRepo(
+    owner: string,
+    repo: string,
+    path: string,
+    content: Buffer,
+    commitMessage: string,
+  ): Promise<string> {
+    const token = this.configService.get<string>('GITHUB_TOKEN');
+    if (!token) {
+      throw new Error(
+        'GITHUB_TOKEN não definido — necessário para upload de arquivos',
+      );
+    }
+    const octokit = new Octokit({ auth: token });
+
+    let sha: string | undefined;
+    try {
+      const existing = await octokit.request(
+        'GET /repos/{owner}/{repo}/contents/{path}',
+        { owner, repo, path },
+      );
+      sha = (existing.data as { sha?: string }).sha;
+    } catch {
+      // Não existe, OK
+    }
+
+    try {
+      await octokit.request('PUT /repos/{owner}/{repo}/contents/{path}', {
+        owner,
+        repo,
+        path,
+        message: commitMessage,
+        content: content.toString('base64'),
+        ...(sha ? { sha } : {}),
+      });
+    } catch (error: unknown) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        'response' in error
+      ) {
+        const apiError = error as {
+          status?: number;
+          response?: { data?: { message?: string } };
+        };
+        throw new Error(
+          `Upload falhou em ${owner}/${repo}/${path} (${apiError.status}): ${apiError.response?.data?.message || 'erro desconhecido'}`,
+        );
+      }
+      throw error;
+    }
+
+    const branch = await this.getDefaultBranch(owner, repo, octokit);
+    const encodedPath = path
+      .split('/')
+      .map((segment) => encodeURIComponent(segment))
+      .join('/');
+
+    return `https://github.com/${owner}/${repo}/blob/${branch}/${encodedPath}?raw=1`;
+  }
+
+  private async getDefaultBranch(
+    owner: string,
+    repo: string,
+    octokit: Octokit,
+  ): Promise<string> {
+    const cacheKey = `${owner}/${repo}`;
+    const cached = this.defaultBranchCache.get(cacheKey);
+    if (cached) return cached;
+
+    try {
+      const repoInfo = await octokit.request('GET /repos/{owner}/{repo}', {
+        owner,
+        repo,
+      });
+      const branch = repoInfo.data.default_branch || 'main';
+      this.defaultBranchCache.set(cacheKey, branch);
+      return branch;
+    } catch {
+      return 'main';
+    }
   }
 
   private async atualizarCamposCustomizados(
@@ -183,11 +267,8 @@ export class GithubService {
       iteracao?: string;
     },
   ): Promise<void> {
-    // IMPORTANTE: Aguarda um pequeno delay após criar o item no projeto
-    // para garantir que o item está completamente criado antes de atualizar campos
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // Mapeamento de campos do DTO para IDs de campos do projeto
     const camposParaAtualizar: Array<{
       fieldId: string;
       value:
@@ -198,7 +279,6 @@ export class GithubService {
       nome: string;
     }> = [];
 
-    // Status
     if (dto.status) {
       camposParaAtualizar.push({
         fieldId: 'PVTSSF_lADOCWdUyM4AbmxDzgRyBk0',
@@ -207,7 +287,6 @@ export class GithubService {
       });
     }
 
-    // Prioridade
     if (dto.prioridade) {
       camposParaAtualizar.push({
         fieldId: 'PVTSSF_lADOCWdUyM4AbmxDzgRyBl8',
@@ -216,7 +295,6 @@ export class GithubService {
       });
     }
 
-    // Tamanho
     if (dto.tamanho) {
       camposParaAtualizar.push({
         fieldId: 'PVTSSF_lADOCWdUyM4AbmxDzgRyBmA',
@@ -225,7 +303,6 @@ export class GithubService {
       });
     }
 
-    // Data Início
     if (dto.dataInicio) {
       camposParaAtualizar.push({
         fieldId: 'PVTF_lADOCWdUyM4AbmxDzgRyBmI',
@@ -234,7 +311,6 @@ export class GithubService {
       });
     }
 
-    // Data Final
     if (dto.dataFinal) {
       camposParaAtualizar.push({
         fieldId: 'PVTF_lADOCWdUyM4AbmxDzgRyBmM',
@@ -243,7 +319,6 @@ export class GithubService {
       });
     }
 
-    // Cliente
     if (dto.cliente) {
       camposParaAtualizar.push({
         fieldId: 'PVTSSF_lADOCWdUyM4AbmxDzg47We8',
@@ -252,7 +327,6 @@ export class GithubService {
       });
     }
 
-    // Sistema
     if (dto.sistema) {
       camposParaAtualizar.push({
         fieldId: 'PVTSSF_lADOCWdUyM4AbmxDzg47XJY',
@@ -261,7 +335,6 @@ export class GithubService {
       });
     }
 
-    // Link Chamado (campo TEXT)
     if (dto.linkChamado) {
       camposParaAtualizar.push({
         fieldId: 'PVTF_lADOCWdUyM4AbmxDzg47XPE',
@@ -270,7 +343,6 @@ export class GithubService {
       });
     }
 
-    // Iteração
     if (dto.iteracao) {
       camposParaAtualizar.push({
         fieldId: 'PVTIF_lADOCWdUyM4AbmxDzg47XbE',
@@ -279,14 +351,17 @@ export class GithubService {
       });
     }
 
-    // Atualiza cada campo sequencialmente (evita problemas de rate limiting)
     for (const campo of camposParaAtualizar) {
       try {
         await octokit.graphql(
           `
-          mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
-            updateProjectV2ItemFieldValue(
+          mutation(
+          $projectId: ID!,
+          $itemId: ID!, $fieldId: ID!,$value: ProjectV2FieldValue!) {
+              updateProjectV2ItemFieldValue(
+              
               input: {
+                
                 projectId: $projectId
                 itemId: $itemId
                 fieldId: $fieldId
@@ -307,20 +382,20 @@ export class GithubService {
           },
         );
 
-        // Pequeno delay entre chamadas para evitar rate limiting
         await new Promise((resolve) => setTimeout(resolve, 100));
       } catch (error: unknown) {
-        this.logger.error(`Erro ao atualizar campo "${campo.nome}" do projeto`);
-
+        this.logger.error(
+          `Erro ao atualizar campo "${campo.nome}" do projeto`,
+          error,
+        );
         if (error && typeof error === 'object' && 'message' in error) {
           this.logger.error((error as Error).message);
         }
-        // Continua tentando atualizar os outros campos mesmo se um falhar
       }
     }
   }
 
-  async listarProjetosUsuario(login: string): Promise<any> {
+  async listarProjetosUsuario(login: string): Promise<unknown> {
     const octokit = await this.getOctokit();
     type ProjectNode = {
       id: string;
@@ -361,7 +436,7 @@ export class GithubService {
     throw new Error('Nenhum projeto encontrado para o usuário informado.');
   }
 
-  async listarProjetosOrganizacao(login: string): Promise<any> {
+  async listarProjetosOrganizacao(login: string): Promise<unknown> {
     const octokit = await this.getOctokit();
     type ProjectNode = {
       id: string;
@@ -405,7 +480,7 @@ export class GithubService {
     throw new Error('Nenhum projeto encontrado para a organização informada.');
   }
 
-  async detalhesProjetoV2(projectId: string): Promise<any> {
+  async detalhesProjetoV2(projectId: string): Promise<unknown> {
     const octokit = await this.getOctokit();
     const result = await octokit.graphql(
       `
@@ -469,7 +544,7 @@ export class GithubService {
     throw new Error('Resposta inesperada da API do GitHub ao detalhar projeto');
   }
 
-  async getRateLimit(): Promise<any> {
+  async getRateLimit(): Promise<unknown> {
     const octokit = await this.getOctokit();
     const result = await octokit.graphql(
       `
@@ -498,7 +573,7 @@ export class GithubService {
     );
   }
 
-  async listarIssuesRepo(owner: string, repo: string): Promise<any> {
+  async listarIssuesRepo(owner: string, repo: string): Promise<unknown> {
     const octokit = await this.getOctokit();
     const issues = await octokit.rest.issues.listForRepo({
       owner,
@@ -506,6 +581,6 @@ export class GithubService {
       state: 'all',
       per_page: 30,
     });
-    return issues.data;
+    return issues.data as unknown;
   }
 }

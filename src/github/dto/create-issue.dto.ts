@@ -4,21 +4,21 @@ import { IsString, IsOptional, IsArray, IsDateString } from 'class-validator';
 export class CreateIssueDto {
   @ApiProperty({ example: 'chgit', description: 'Nome do repositório' })
   @IsString()
-  repo: string;
+  repo!: string;
 
   @ApiProperty({
     example: 'Título da issue',
     description: 'Título que deseja inserir para a issue',
   })
   @IsString()
-  title: string;
+  title!: string;
 
   @ApiProperty({
     example: 'Descrição da issue',
     description: 'Corpo/descrição da issue',
   })
   @IsString()
-  body: string;
+  body!: string;
 
   @ApiPropertyOptional({
     example: 'PVT_kwHOAYb3Ps4BH3XF',
@@ -151,7 +151,7 @@ export class CreateIssueDto {
   sistema?: string;
 
   @ApiPropertyOptional({
-    example: 'https://chamados.exemplo.com/123',
+    example: 'http://localhost:3000/#/detalhes/123456',
     description: 'Link do Chamado (campo texto livre)',
   })
   @IsOptional()
